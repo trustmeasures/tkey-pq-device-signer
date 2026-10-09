@@ -1,5 +1,42 @@
 # Hardware ML-DSA Local Tests
 
+## FIPS202 driver and simulator validation
+
+Run `make test-fips202` from the repository root. Compilation and execution use
+`localhost/tkey-builder-local`, matching tillitis-key1's local Podman builder.
+The image must provide GCC with ASan/UBSan and Icarus Verilog. Override `IMAGE`
+when using an equivalent builder image.
+
+This target does not access or flash a physical device. It checks:
+
+- SHA3-256/512 and SHAKE128/256 empty-input known-answer vectors.
+- 288 differential cases against the vendored tiny_sha3 reference, including
+  rate boundaries, multi-block input/output, incremental absorption and partial
+  squeezing, and zero-length SHAKE output.
+- Lifecycle, exclusive ownership, software wiping and timeout lockout.
+- Three fixed-seed ML-DSA-44 keypairs and 18 fixed-randomness signatures against
+  the original software backend, including external-MU signing,
+  cross-verification and tampered signatures/messages.
+- Driver-generated MMIO transaction replay against the actual SHA3 wrapper/core
+  RTL, including checks of all 25 public state lanes after release.
+
+Host tests use a software MMIO model; only the subsequent RTL replay validates
+the real core logic. Neither is an on-device execution or timing measurement.
+Generated binaries, transaction traces and link maps are under `.build/`.
+
+For timing comparisons, build both backends with `TKEY_DEBUG=1` and use the
+existing device-side signing timer, excluding touch and transport latency.
+Obtain deployment approval first, then use the hardware harness below. Record
+key-generation/signing time, app size and RAM/stack measurements for both builds.
+ELF BSS alone does not measure peak RAM: ML-DSA contexts also occupy the stack.
+ASan differential checks do not replace NIST ACVP conformance testing.
+
+Signer key/signature randomness is provided directly by `hw_rng`'s
+`rng_get_word()` API. The signer no longer has its own `rng.c` DRBG or the
+SHA-256 implementation previously used by that DRBG. `rng_get_word()` reads
+the RNG core's conditioned output buffer, not the raw oscillator entropy
+registers; applications must not use raw TRNG entropy words as random output.
+
 This folder contains a local hardware validation harness for the TKey ML-DSA signer.
 
 The goal is to verify end-to-end behavior on real hardware:
