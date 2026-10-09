@@ -14,7 +14,6 @@
 
 #include "app_proto.h"
 #include "platform.h"
-#include "rng.h"
 
 // clang-format off
 static volatile uint32_t *cdi           = (volatile uint32_t *) TK1_MMIO_TK1_CDI_FIRST;
@@ -515,9 +514,6 @@ int main(void)
 	enum state state = STATE_STARTED;
 	struct packet pkt = {0};
 	
-	// Initialize RNG
-	rng_init();
-
 	// Use Execution Monitor on RAM after app
 	*cpu_mon_first = *app_addr + *app_size;
 	*cpu_mon_last = TK1_RAM_BASE + TK1_RAM_SIZE;

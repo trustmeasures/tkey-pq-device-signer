@@ -6,12 +6,18 @@ else
 	shasum = sha512sum
 endif
 
-IMAGE=ghcr.io/tillitis/tkey-builder:5rc1
+IMAGE ?= localhost/tkey-builder-local
+PODMAN_TARGET ?= all
 
 OBJCOPY ?= llvm-objcopy
 
 P := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
-LIBDIR ?= $(P)/../tkey-libs
+LIBDIR ?= $(P)/../tillitis-key1/hw/application_fpga/tkey-libs
+FIPS202_BACKEND ?= hardware
+ifeq ($(filter $(FIPS202_BACKEND),hardware software),)
+$(error FIPS202_BACKEND must be hardware or software)
+endif
+BUILD_DIR := .build/$(FIPS202_BACKEND)
 
 CC = clang
 
@@ -31,6 +37,9 @@ CFLAGS = -target riscv32-unknown-none-elf -march=rv32iczmmul -mabi=ilp32 -mcmode
    -DMLD_CONFIG_FILE=\"mldsa_config.h\" \
    $(INCLUDES) -I $(LIBDIR) #-DQEMU_DEBUG
 
+ifeq ($(FIPS202_BACKEND),hardware)
+CFLAGS += -DTKEY_FIPS202_HARDWARE
+endif
 ifneq ($(TKEY_DEBUG),)
 CFLAGS := $(CFLAGS) -DTKEY_DEBUG
 endif
@@ -42,7 +51,8 @@ endif
 AS = clang
 ASFLAGS = -target riscv32-unknown-none-elf -march=rv32iczmmul -mabi=ilp32 -mcmodel=medany -mno-relax
 
-LDFLAGS=-T $(LIBDIR)/app.lds -L $(LIBDIR) -lcommon -lcrt0
+LDLIBS = -L $(LIBDIR) -lhw -lmonocypher -lcommon -lcrt0
+LDFLAGS = -T $(LIBDIR)/app.lds
 
 
 .PHONY: all
@@ -76,17 +86,52 @@ check:
 	$(CLANG_TIDY) -header-filter=.* -checks=cert-* signer/*.[ch] -- $(CFLAGS)
 
 # Simple mldsa signer app
-SIGNEROBJS=signer/main.o signer/app_proto.o signer/rng.o signer/sha256/sha256.o signer/mldsa.o
-signer/app.elf: $(SIGNEROBJS)
-	$(CC) $(CFLAGS) $(SIGNEROBJS) $(LDFLAGS) -L $(LIBDIR)/monocypher -lmonocypher -I $(LIBDIR) $(INCLUDES) -o $@
-$(SIGNEROBJS): $(LIBDIR)/include/tkey/tk1_mem.h signer/app_proto.h signer/rng.h signer/sha256/sha256.h
+SIGNERSRCS = signer/main.c signer/app_proto.c
+SIGNEROBJS = $(addprefix $(BUILD_DIR)/,$(SIGNERSRCS:.c=.o)) $(BUILD_DIR)/signer/mldsa.o
+LIBARCHIVES = $(addprefix $(LIBDIR)/,libhw.a libmonocypher.a libcommon.a libcrt0.a)
 
-signer/mldsa.o: $(P)/mldsa-native/mldsa/mldsa_native.c
-	$(CC) $(CFLAGS) -c $< -o $@
+.PHONY: FORCE
+FORCE:
+
+$(BUILD_DIR)/config: FORCE
+	@mkdir -p $(@D)
+	@printf '%s\n' '$(CC)' '$(CFLAGS)' '$(LDFLAGS)' '$(LDLIBS)' > $@.tmp
+	@cmp -s $@.tmp $@ || mv $@.tmp $@
+	@rm -f $@.tmp
+
+$(BUILD_DIR)/libs: FORCE
+	$(MAKE) -C $(LIBDIR) all
+	@mkdir -p $(@D)
+	@$(shasum) $(LIBARCHIVES) > $@.tmp
+	@cmp -s $@.tmp $@ || mv $@.tmp $@
+	@rm -f $@.tmp
+
+$(BUILD_DIR)/signer/app.elf: $(SIGNEROBJS) $(BUILD_DIR)/libs $(LIBDIR)/app.lds
+	$(CC) $(CFLAGS) $(SIGNEROBJS) $(LDFLAGS) $(LDLIBS) -Wl,-Map,$@.map -o $@
+
+signer/app.elf: $(BUILD_DIR)/signer/app.elf FORCE
+	cp $< $@
+
+signer/app.bin: $(BUILD_DIR)/signer/app.bin signer/app.elf FORCE
+	cp $< $@
+
+$(SIGNEROBJS): $(LIBDIR)/include/driver/hw_rng.h $(LIBDIR)/include/tkey/tk1_mem.h signer/app_proto.h
+$(SIGNEROBJS): $(BUILD_DIR)/config
+
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD_DIR)/signer/mldsa.o: mldsa-native/mldsa/mldsa_native.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(SIGNEROBJS:.o=.d)
 
 .PHONY: clean
 clean:
-	rm -f signer/app.bin signer/app.elf $(SIGNEROBJS)
+	rm -f signer/app.bin signer/app.elf
+	rm -rf .build/hardware .build/software
 
 # Uses ../.clang-format
 FMTFILES=signer/*.[ch]
@@ -101,11 +146,15 @@ checkfmt:
 
 .PHONY: podman
 podman:
-	podman run --arch=amd64 --rm --mount type=bind,source=$(CURDIR),target=/src --mount type=bind,source=$(LIBDIR),target=/tkey-libs -w /src -it $(IMAGE) make -j $(if $(TKEY_DEBUG),TKEY_DEBUG=$(TKEY_DEBUG)) $(if $(TKEY_SIGNER_APP_NO_TOUCH),TKEY_SIGNER_APP_NO_TOUCH=$(TKEY_SIGNER_APP_NO_TOUCH))
+	podman run --arch=amd64 --rm --mount type=bind,source=$(CURDIR),target=/src --mount type=bind,source=$(LIBDIR),target=/tkey-libs -w /src $(IMAGE) make -j LIBDIR=/tkey-libs FIPS202_BACKEND=$(FIPS202_BACKEND) $(if $(TKEY_DEBUG),TKEY_DEBUG=$(TKEY_DEBUG)) $(if $(TKEY_SIGNER_APP_NO_TOUCH),TKEY_SIGNER_APP_NO_TOUCH=$(TKEY_SIGNER_APP_NO_TOUCH)) $(PODMAN_TARGET)
 
 .PHONY: test-hw-mldsa
 test-hw-mldsa:
 	bash tests/run_mldsa_hw_local.sh
+
+.PHONY: test-fips202
+test-fips202:
+	podman run --arch=amd64 --rm --mount type=bind,source=$(CURDIR),target=/src --mount type=bind,source=$(LIBDIR),target=/tkey-libs --mount type=bind,source=$(LIBDIR)/../core/sha3,target=/sha3-core,ro -w /src $(IMAGE) make -C tests/fips202 LIBDIR=/tkey-libs CORE=/sha3-core
 
 .PHONY: test-hw-mldsa-protocol-negative
 test-hw-mldsa-protocol-negative:

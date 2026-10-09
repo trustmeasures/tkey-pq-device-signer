@@ -5,17 +5,11 @@
 
 set -eu
 
-tkey_libs_version="castor-alpha-1"
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+libdir=${LIBDIR:-"$project_dir/../tillitis-key1/hw/application_fpga/tkey-libs"}
 
-printf "Building tkey-libs with version: %s\n" "$tkey_libs_version"
-
-if [ -d ../tkey-libs ]
-then
-    (cd ../tkey-libs; git checkout "$tkey_libs_version")
-else
-    git clone -b "$tkey_libs_version" https://github.com/tillitis/tkey-libs.git ../tkey-libs
-fi
-
-make -j -C ../tkey-libs podman
-
-make -j podman
+image=${IMAGE:-localhost/tkey-builder-local}
+make -j -C "$libdir" podman IMAGE="$image"
+make -j -C "$project_dir" podman LIBDIR="$libdir" IMAGE="$image" \
+    FIPS202_BACKEND="${FIPS202_BACKEND:-hardware}" \
+    PODMAN_TARGET="${PODMAN_TARGET:-all}"

@@ -29,6 +29,59 @@ external MU computation.
 
 See [Release notes](RELEASE.md).
 
+## Hardware FIPS202 backend
+
+The default build uses the SHA3/SHAKE accelerator through the drivers in
+`../tillitis-key1/hw/application_fpga/tkey-libs`. It requires the matching
+SHA3-enabled FPGA image and memory map; it cannot run on an unmodified TKey
+or an emulator without this peripheral. There is no automatic software fallback.
+
+Build with the same local Podman image used by tillitis-key1:
+
+```sh
+make podman PODMAN_TARGET=signer/app.bin FIPS202_BACKEND=hardware
+make podman PODMAN_TARGET=signer/app.bin FIPS202_BACKEND=software
+```
+
+Override `IMAGE` or `LIBDIR` explicitly if necessary. Both builds use the same
+library location inside the container. Libraries are built automatically.
+Objects and binaries are isolated under `.build/hardware` and `.build/software`;
+the selected binary is also copied to `signer/app.bin`. Compiler/linker flag
+changes invalidate the selected build's objects. `FIPS202_BACKEND=software`
+selects the software SHAKE implementation only; both variants use the
+TKey `hw_rng` driver directly for ML-DSA randomness. The driver's words come
+from the TKey RNG output buffer, which is backed by its on-device CTR_DRBG;
+the signer no longer adds a separate software SHA-256 DRBG.
+
+The adapter [signer/fips202_hw.h](signer/fips202_hw.h) implements the serial
+ML-DSA FIPS202 API. ML-DSA's serial configuration prevents concurrent SHAKE
+contexts: the hardware cannot save/restore its internal state. Do not use the
+SHA3 peripheral from an interrupt or another component while a context is active.
+Driver errors invoke TKey assertions, halting the CPU rather than returning a
+signature based on failed hashing. Debug builds report the assertion.
+
+Releasing a context wipes its software buffers and overwrites all input
+registers and the complete sponge state with a public zero-block computation.
+The resulting hardware state is public, **not all zero**. This adds one
+permutation per context. A timed-out peripheral cannot be reliably scrubbed;
+the driver rejects further operations until device reset.
+
+The app digest changes with the backend and toolchain. The normal `all` target
+(also the default Podman target) still checks `signer/app.bin.sha512` and is
+expected to reject a changed binary until its measurement is reviewed.
+Building the binary alone is not approval to deploy it. Do not update digest
+expectations or client trust values automatically. Because key generation uses
+the device CDI, changing the application measurement may also change its signing
+identity. The host protocol itself is unchanged.
+
+Run simulator/differential checks with:
+
+```sh
+make test-fips202
+```
+
+See [tests/README.md](tests/README.md) for coverage and on-device validation.
+
 ## Client Go package
 
 We provide a Go package to use with `tkey-pq-device-signer`:
