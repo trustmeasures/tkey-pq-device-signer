@@ -323,7 +323,9 @@
  *              the same API (see FIPS202.md).
  *
  *****************************************************************************/
-/* #define MLD_CONFIG_FIPS202_CUSTOM_HEADER "SOME_FILE.h" */
+#if defined(TKEY_FIPS202_HARDWARE)
+#define MLD_CONFIG_FIPS202_CUSTOM_HEADER "fips202_hw.h"
+#endif
 
 /******************************************************************************
  * Name:        MLD_CONFIG_FIPS202X4_CUSTOM_HEADER
@@ -401,10 +403,30 @@ static inline void mld_zeroize(void *ptr, size_t len)
 #if !defined(__ASSEMBLER__)
 #include <stddef.h>
 #include <stdint.h>
-#include <rng.h>
+#include <driver/hw_rng.h>
 
 static inline int mld_randombytes(uint8_t *out, size_t outlen) {
-    return rng_get(out, outlen);
+    size_t offset = 0;
+
+    if (out == NULL && outlen != 0) {
+        return -1;
+    }
+
+    while (offset < outlen) {
+        uint32_t word = rng_get_word();
+        size_t count = outlen - offset;
+
+        if (count > sizeof(word)) {
+            count = sizeof(word);
+        }
+
+        for (size_t i = 0; i < count; i++) {
+            out[offset + i] = (uint8_t)(word >> (8 * i));
+        }
+        offset += count;
+    }
+
+    return 0;
 }
 
 #endif
@@ -638,7 +660,10 @@ static inline int mld_randombytes(uint8_t *out, size_t outlen) {
  *              Only enable this when you have to.
  *
  *****************************************************************************/
-/* #define MLD_CONFIG_SERIAL_FIPS202_ONLY */
+#if defined(TKEY_FIPS202_HARDWARE)
+/* The core cannot save/restore contexts: reserve it until SHAKE release. */
+#define MLD_CONFIG_SERIAL_FIPS202_ONLY
+#endif
 
 /******************************************************************************
  * Name:        MLD_CONFIG_CONTEXT_PARAMETER
